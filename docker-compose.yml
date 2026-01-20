@@ -1,0 +1,147 @@
+#===============================================================================
+# Docker Compose - Système RAG DevOps Auto-hébergé
+# Optimisé pour Ubuntu 24.04 + NVIDIA RTX 3080 (10GB VRAM)
+#===============================================================================
+
+services:
+  #-----------------------------------------------------------------------------
+  # Ollama - Serveur LLM local
+  #-----------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    hostname: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+      # Optimisations pour RTX 3080
+      - OLLAMA_NUM_PARALLEL=2          # Requêtes parallèles (2 pour 10GB VRAM)
+      - OLLAMA_MAX_LOADED_MODELS=1     # Un seul modèle en VRAM à la fois
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  #-----------------------------------------------------------------------------
+  # Qdrant - Base de données vectorielle
+  #-----------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    hostname: qdrant
+    ports:
+      - "6333:6333"   # API REST
+      - "6334:6334"   # gRPC
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    environment:
+      - QDRANT__LOG_LEVEL=INFO
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      # Optimisation pour petit dataset (<50 fichiers)
+      - QDRANT__STORAGE__ON_DISK_PAYLOAD=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  #-----------------------------------------------------------------------------
+  # Open WebUI - Interface utilisateur avec RAG intégré
+  #-----------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    hostname: open-webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./data/open-webui:/app/backend/data
+      - ./docs:/app/backend/data/docs:ro   # Documentation à indexer (lecture seule)
+    environment:
+      # Connexion à Ollama
+      - OLLAMA_BASE_URL=http://ollama:11434
+      
+      # Configuration générale
+      - WEBUI_NAME=DevOps Assistant
+      - ENABLE_SIGNUP=true               # Désactiver après création du compte admin
+      - DEFAULT_USER_ROLE=user
+      
+      # Configuration RAG
+      - RAG_EMBEDDING_ENGINE=ollama
+      - RAG_EMBEDDING_MODEL=nomic-embed-text
+      - RAG_OLLAMA_BASE_URL=http://ollama:11434
+      
+      # Paramètres de chunking (optimisés pour doc technique)
+      - CHUNK_SIZE=500
+      - CHUNK_OVERLAP=50
+      
+      # Performance
+      - RAG_TOP_K=5                       # Nombre de chunks récupérés
+      - RAG_RELEVANCE_THRESHOLD=0.3       # Seuil de pertinence
+      
+      # Sécurité (à configurer en production)
+      # - WEBUI_SECRET_KEY=votre-secret-key-ici
+      
+    depends_on:
+      ollama:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+#-------------------------------------------------------------------------------
+# Réseau
+#-------------------------------------------------------------------------------
+networks:
+  rag-network:
+    driver: bridge
+    name: rag-network
+
+#-------------------------------------------------------------------------------
+# Notes de configuration
+#-------------------------------------------------------------------------------
+# 
+# Modèles recommandés pour RTX 3080 (10GB VRAM):
+#   - qwen2.5-coder:7b-instruct     (~5GB)  - Recommandé
+#   - qwen2.5-coder:14b-instruct-q4 (~9GB)  - Maximum, peut être lent
+#   - deepseek-coder:6.7b           (~4GB)  - Alternative
+#   - codellama:7b                  (~4GB)  - Legacy
+#
+# Pour télécharger un modèle:
+#   docker exec ollama ollama pull qwen2.5-coder:7b-instruct
+#
+# Pour voir les modèles installés:
+#   docker exec ollama ollama list
+#
+# Accès aux services:
+#   - Open WebUI:  http://localhost:3000
+#   - Ollama API:  http://localhost:11434
+#   - Qdrant UI:   http://localhost:6333/dashboard
+#
